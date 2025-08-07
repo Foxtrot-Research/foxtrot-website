@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Foxtrot Research - ISS Tracker</title>
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+<style>
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #121212;
+    color: #eee;
+  }
+  #map {
+    height: 80vh;
+    width: 100vw;
+  }
+  #info {
+    background: rgba(0,0,0,0.7);
+    padding: 10px 15px;
+    font-size: 16px;
+  }
+  #recenterBtn {
+    background: #64b5f6;
+    border: none;
+    color: white;
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: 3px;
+    margin-left: 10px;
+  }
+  #recenterBtn:hover {
+    background: #1976d2;
+  }
+  a {
+    color: #64b5f6;
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="info">
+  <b>Foxtrot Research - ISS Tracker</b><br />
+  Lat: <span id="lat">...</span>,
+  Lon: <span id="lon">...</span> | 
+  Altitude: <span id="alt">...</span> km | 
+  Speed: <span id="vel">...</span> km/h<br />
+  Time (EST): <span id="time">...</span><br />
+  Your Location: <span id="userLoc">Loading...</span><br />
+  Next ISS Pass: <span id="nextPass">Loading...</span>
+  <button id="recenterBtn" title="Center map on ISS">Recenter on ISS</button><br />
+  <small>Data from <a href="https://wheretheiss.at" target="_blank" rel="noopener noreferrer">wheretheiss.at API</a> and <a href="https://open-notify.org" target="_blank" rel="noopener noreferrer">Open Notify</a>.</small>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+
+// Initialize the map
+const map = L.map('map').setView([0, 0], 2);
+
+// Add OpenStreetMap tile layer
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 6,
+  attribution: 'Map &copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
+}).addTo(map);
+
+// Day/Night overlay (simple shaded circle for night side)
+let dayNightLayer = null;
+
+function updateDayNight() {
+  if(dayNightLayer) map.removeLayer(dayNightLayer);
+
+  const now = new Date();
+  const jd = now.valueOf()/86400000 + 2440587.5;
+  const d = jd - 2451545.0;
+  const g = 357.529 + 0.98560028 * d;
+  const q = 280.459 + 0.98564736 * d;
+  const L = (q + 1.915 * Math.sin(g * Math.PI / 180) + 0.020 * Math.sin(2 * g * Math.PI / 180)) % 360;
+  const e = 23.439 - 0.00000036 * d;
+  const ra = Math.atan2(Math.cos(e * Math.PI/180) * Math.sin(L * Math.PI/180), Math.cos(L * Math.PI/180)) * 180 / Math.PI;
+  const dec = Math.asin(Math.sin(e * Math.PI/180) * Math.sin(L * Math.PI/180)) * 180 / Math.PI;
+  const gst = (280.46061837 + 360.98564736629 * d) % 360;
+  const subsolarLon = (ra - gst + 360) % 360 - 180;
+  const subsolarLat = dec;
+
+  dayNightLayer = L.circle([subsolarLat, subsolarLon], {
+    radius: 10000000,
+    color: '#000',
+    fillColor: '#000',
+    fillOpacity: 0.4,
+    stroke: false
+  }).addTo(map);
+}
+
+// ISS marker & trail setup
+const issIcon = L.icon({
+  iconUrl: 'https://upload.wikimedia.org/wikipedia/commons/d/d0/International_Space_Station.svg',
+  iconSize: [50, 32],
+  iconAnchor: [25, 16],
+});
+const issMarker = L.marker([0, 0], {icon: issIcon}).addTo(map);
+
+let issTrail = L.polyline([], {color: '#64b5f6'}).addTo(map);
+const trailPositions = [];
+
+let firstISSLoad = true;
+
+// User location marker
+let userMarker = null;
+
+// Update ISS position every 1.5 seconds
+async function updateISS() {
+  try {
+    const res = await fetch('https://api.wheretheiss.at/v1/satellites/25544');
+    const data = await res.json();
+
+    const {latitude, longitude, altitude, velocity, timestamp} = data;
+
+    issMarker.setLatLng([latitude, longitude]);
+
+    trailPositions.push([latitude, longitude]);
+    if(trailPositions.length > 40) trailPositions.shift();
+    issTrail.setLatLngs(trailPositions);
+
+    document.getElementById('lat').textContent = latitude.toFixed(2);
+    document.getElementById('lon').textContent = longitude.toFixed(2);
+    document.getElementById('alt').textContent = altitude.toFixed(2);
+    document.getElementById('vel').textContent = velocity.toFixed(2);
+    const estTime = new Date(timestamp*1000).toLocaleString('en-US', {timeZone: 'America/New_York'});
+    document.getElementById('time').textContent = estTime;
+
+    if(firstISSLoad) {
+      map.setView([latitude, longitude], 3);
+      firstISSLoad = false;
+    }
+  } catch(e) {
+    console.error('Error fetching ISS data', e);
+  }
+}
+
+// Get user location and next pass (once)
+function locateUserAndPass() {
+  if(!navigator.geolocation) {
+    document.getElementById('userLoc').textContent = 'Geolocation not supported';
+    document.getElementById('nextPass').textContent = 'Unavailable';
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    document.getElementById('userLoc').textContent = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+
+    if(!userMarker) {
+      userMarker = L.marker([lat, lon], {
+        title: 'Your Location',
+        icon: L.icon({
+          iconUrl: 'https://upload.wikimedia.org/wikipedia/commons/e/ec/RedDot.svg',
+          iconSize: [16, 16],
+          iconAnchor: [8, 8],
+        }),
+      }).addTo(map);
+    } else {
+      userMarker.setLatLng([lat, lon]);
+    }
+
+    try {
+      const res = await fetch(`https://api.open-notify.org/iss-pass.json?lat=${lat}&lon=${lon}`);
+      const data = await res.json();
+      if(data.message === 'success' && data.response.length > 0) {
+        const nextPassTime = new Date(data.response[0].risetime * 1000).toLocaleString('en-US', {timeZone: 'America/New_York'});
+        document.getElementById('nextPass').textContent = nextPassTime;
+      } else {
+        document.getElementById('nextPass').textContent = 'No pass info';
+      }
+    } catch {
+      document.getElementById('nextPass').textContent = 'Unavailable';
+    }
+
+  }, () => {
+    document.getElementById('userLoc').textContent = 'Permission denied';
+    document.getElementById('nextPass').textContent = 'Unavailable';
+  });
+}
+
+// Button to recenter map on ISS
+document.getElementById('recenterBtn').addEventListener('click', () => {
+  const lat = issMarker.getLatLng().lat;
+  const lon = issMarker.getLatLng().lng;
+  map.setView([lat, lon], 3);
+});
+
+function updateLoop() {
+  updateISS();
+}
+
+updateLoop();
+setInterval(updateLoop, 1500);
+locateUserAndPass();
+updateDayNight();
+setInterval(updateDayNight, 60000); // update day/night every minute
+
+</script>
+</body>
+</html>
